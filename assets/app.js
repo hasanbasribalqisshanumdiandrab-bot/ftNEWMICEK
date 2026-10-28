@@ -714,6 +714,7 @@
     const T = KEYS.team, on = !!T; TMSETUP = null; show($('tmSetup'), false);
     $('tmState').className = 'alert ' + (on ? 'ok' : 'warn');
     $('tmState').innerHTML = on ? '🟢 <b>Authenticator tim aktif</b> — anggota tim login hanya dengan kode 6 angka dari Authenticator admin ini. Dibuat ' + (T.at ? esc(fmtDate(T.at)) : '—') + '.' : '⚪ <b>Belum dibuat.</b> Buat dulu supaya anggota tim bisa login memakai kode dari admin.';
+    if (on && tokenOk !== true) { $('tmState').className = 'alert warn'; $('tmState').innerHTML += '<br>⚠️ <b>Belum terbit ke GitHub</b> — anggota tim belum bisa login sampai token GitHub diterima (tab “Terbitkan ke GitHub” → isi token → <b>Terbitkan pengaturan</b>).'; }
     show($('tmOn'), on); $('tmStart').textContent = on ? 'Ganti Authenticator tim (putuskan semua)' : 'Buat Authenticator tim';
     if (on) { $('tmQr').innerHTML = qrSvg(teamUri(T.s)) || ''; $('tmKey').textContent = T.s.match(/.{1,4}/g).join(' '); tmTick(); }
   }
@@ -904,15 +905,15 @@
     const b = $('syncState');
     if (!tokenReady()) { b.className = 'alert warn'; b.innerHTML = '🔴 <b>Belum aktif</b> — isi <b>token GitHub</b> sekali di tab “Terbitkan ke GitHub” agar perubahan akun & kode langsung berlaku (tanpa deploy).'; }
     else if (tokenOk === true) { b.className = 'alert ok'; b.innerHTML = '🟢 <b>Sinkron langsung aktif</b> — token diterima GitHub. Perubahan akun & kode langsung berlaku tanpa deploy ulang.'; }
-    else if (tokenOk === false) { b.className = 'alert err'; b.innerHTML = '🔴 <b>Token ditolak GitHub</b> — ikuti petunjuk perbaikan di bawah, lalu klik “Terbitkan akun & password” lagi.'; }
-    else { b.className = 'alert warn'; b.innerHTML = '🟡 <b>Token terisi, belum diuji</b> — klik <b>Terbitkan akun &amp; password</b> (tab Terbitkan ke GitHub) sekali untuk mengujinya.'; }
+    else if (tokenOk === false) { b.className = 'alert err'; b.innerHTML = '🔴 <b>Token ditolak GitHub</b> — ikuti petunjuk perbaikan di bawah, lalu klik “Terbitkan pengaturan” lagi.'; }
+    else { b.className = 'alert warn'; b.innerHTML = '🟡 <b>Token terisi, belum diuji</b> — klik <b>Terbitkan pengaturan</b> (tab Terbitkan ke GitHub) sekali untuk mengujinya.'; }
   }
   $('ghToken').addEventListener('change', () => { const v = $('ghToken').value.trim(); tokenOk = null; if (v) { ss.set('cs_gh_token', v); if ($('ghRemember').checked) ls.set('cs_gh_token_p', v); } syncBar(); });
   $('ghRemember').addEventListener('change', () => { const v = $('ghToken').value.trim(); if ($('ghRemember').checked && v) ls.set('cs_gh_token_p', v); else ls.del('cs_gh_token_p'); });
   /** Simpan keys.js ke GitHub sekarang juga; pengguna membacanya langsung dari GitHub (tanpa menunggu Pages). */
   async function commitKeys(okHtml) {
     adminDirty = true;
-    if (!tokenReady()) { adMsg(okHtml + '<br>⚠️ <b>Belum aktif untuk pengguna.</b> Isi token GitHub di tab “Terbitkan ke GitHub” (cukup sekali per sesi), lalu klik <b>Terbitkan akun &amp; password</b>. Berikutnya otomatis.', 'warn'); return false; }
+    if (!tokenReady()) { adMsg(okHtml + '<br>⚠️ <b>Belum aktif untuk pengguna.</b> Isi token GitHub di tab “Terbitkan ke GitHub” (cukup sekali per sesi), lalu klik <b>Terbitkan pengaturan</b>. Berikutnya otomatis.', 'warn'); return false; }
     try {
       const cfg = ghCfg(); adMsg('<span class="spin"></span>Mengaktifkan…', 'warn');
       await ghPut(cfg, 'data/keys.js', keysText(), 'Admin: perbarui akun & kode pengguna');
