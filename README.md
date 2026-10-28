@@ -10,11 +10,21 @@ panel Admin untuk mengganti password, baca 1–50 soal sekaligus, soal dari gamb
 3. **Settings → Pages** → *Build and deployment* → Source: **Deploy from a branch** → Branch: `main` / folder `/ (root)` → **Save**.
 4. Tunggu 1–2 menit. Alamatnya: `https://USERNAME.github.io/NAMA-REPO/`.
 
-## B. Login
-- **Tim:** Username (boleh dikosongkan) + Password. Huruf besar/kecil password tim tidak dibedakan.
-- **Admin:** klik “Masuk sebagai Admin” → email admin + password admin.
-- Sesi aktif **maksimal 2 jam**, lalu otomatis keluar dan harus login lagi. Tidak keluar sendiri sebelum itu. Berlaku sama di HP mana pun.
-- Password awal diberikan terpisah oleh pembuat (tidak ditulis di repo). **Admin awal harus segera ganti password admin** (Panel Admin → Password admin).
+## B. Login (versi Authenticator tim)
+- **Anggota tim (mis. Ari):** isi nama (opsional) + **kode 6 angka dari Google Authenticator admin**. Tanpa password. Kode **diminta ke admin setiap login** (berubah tiap 30 detik). Sesi maksimal **2 jam**, atau sampai admin memutus perangkatnya.
+- Belum punya kontak admin? Tautan **Hubungi admin lewat email** di layar login membuka email berisi nama, jenis perangkat, dan ID perangkat.
+- **Admin:** “Masuk sebagai Admin” → email + password admin → kode Authenticator admin pribadi (bila sudah dihubungkan). Tidak berubah.
+
+### Pasang pertama kali
+1. Unggah hanya `index.html`, folder `assets`, `tools/Code.gs`, `README.md` (**jangan menimpa folder `data/`** — berisi akun & kunci terbaru dari panel Admin).
+2. Login Admin → ⚙️ Admin → tab **Authenticator tim** → *Buat Authenticator tim* → pindai QR → konfirmasi. Tab itu juga menampilkan **kode saat ini** untuk diberikan ke anggota tim (perlu token GitHub agar langsung aktif).
+3. Tab **Perangkat** → pasang **Pusat Perangkat** (Apps Script gratis, sekali): tempel `tools/Code.gs`, ganti `ADMIN_KEY`, Deploy → Web app (Execute as *Me*, access *Anyone*), tempel alamat `/exec` + kunci di panel → *Simpan & hubungkan*.
+
+### Perangkat & memutus
+Tab **Perangkat** menampilkan nama, jenis HP/PC (mis. “Android SM-S918B · Chrome”, “iPhone · Safari”), waktu masuk, terakhir aktif, dan status 🟢/⚪/🔴. **Putuskan** → perangkat keluar otomatis ±45 detik dan ditolak login sampai **Izinkan lagi**. **Ganti Authenticator tim** memutus semua sekaligus.
+
+### Catatan keamanan (jujur)
+Hosting statis tidak punya server, jadi rahasia Authenticator tim ikut tersimpan di `data/keys.js` (publik) agar halaman bisa memeriksa kode. Artinya ini **gerbang di layar login**, bukan enkripsi yang kuat terhadap orang yang membaca berkas repo dan paham TOTP. Akun & password tim lama dihapus dari login. Bila khawatir, pakai Rotasi penuh secara berkala. Memutus perangkat berdasarkan ID per browser: pengguna yang menghapus data browser mendapat ID baru (akan muncul lagi di daftar) — gunakan *Ganti Authenticator tim* bila perlu.
 
 ## C. Ganti password tim (Panel Admin)
 Login Admin → tombol **⚙️ Admin**:
@@ -32,9 +42,11 @@ Login Admin → tombol **⚙️ Admin**:
 - **Sinkron langsung (tanpa deploy):** isi *token GitHub* sekali di tab "Terbitkan ke GitHub". Setelah itu setiap buat/hapus kode, ganti password, tambah/hapus akun otomatis disimpan ke GitHub.
   Halaman login membaca data akun terbaru langsung dari GitHub (bukan dari cache situs), jadi akun/kode baru bisa dipakai dalam hitungan detik tanpa menunggu GitHub Pages.
 - **Nonaktif otomatis:** perangkat yang sedang login memeriksa data terbaru tiap ±1 menit dan saat kembali ke tab. Akun/kode yang dihapus atau password yang diganti → pengguna otomatis keluar.
-- **Kode pengguna baru:** Panel Admin → tab "Kode pengguna baru". Kode dipakai di kolom Password; berlaku sesuai batas waktu dan sekali pakai per perangkat.
-  Keterbatasan hosting statis: kode tidak bisa ditandai "terpakai" di semua perangkat sekaligus. Pakai masa berlaku singkat (1 jam) dan hapus kode setelah dipakai.
-  Data yang sudah pernah terbuka di perangkat tidak bisa ditarik; untuk mencabut total pakai "Rotasi penuh".
+- **Login pengguna (non-admin) pakai Google Authenticator:** Panel Admin → tab "Pengguna Authenticator" → isi nama → *Buat pengguna & kode aktivasi*.
+  Admin memberi **kode aktivasi** (10 karakter) ke pengguna. Pengguna: (1) buka halaman login, ketik kode aktivasi di kolom *Kode*; (2) pindai QR dengan Google Authenticator; (3) ketik kode 6 angka → masuk.
+  Seterusnya di perangkat itu **cukup kode 6 angka** (username boleh dikosongkan). HP baru / ganti HP: buat ulang pengguna dengan nama yang sama → kode aktivasi baru.
+  Hapus pengguna di tab itu → langsung nonaktif di semua perangkat (±1 menit). Perlu token GitHub agar perubahan langsung terbit (lihat C1b).
+  Rahasia Authenticator tidak pernah tersimpan polos di `keys.js`: dibungkus kode aktivasi, dan kunci data dibungkus rahasia itu. Password akun tim lama tetap bisa dipakai di kolom yang sama.
 - **Auto-tempel:** tombol "Tempel & Cari" + opsi Auto-tempel (saat kotak soal kosong diketuk / saat kembali ke halaman). Butuh HTTPS (GitHub Pages sudah) dan izin "tempel" browser.
 
 ## C1b. Token GitHub bermasalah ("Resource not accessible by personal access token")
