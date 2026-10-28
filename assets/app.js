@@ -26,10 +26,11 @@
   let KEYS = null, DEK = null, SESS = null;
   let META = null, ENT = [], exactMap = new Map(), LOCAL_ADDED = 0;
   let tickT = null, LAST = null;
-  let tokenOk = null, PEND = null, TSETUP = null;
+  let tokenOk = null, PEND = null, TSETUP = null, TMSETUP = null;
+  let pingT = null, tmT = null, devT = null, tFails = 0, tLock = 0, DEVS = [];
   let LIVE = null, adminDirty = false, liveAt = 0, watchT = null, gateUntil = 0, gateFails = 0, gateLock = 0;
-  const INV_KEEP = 3 * 3600 * 1000;      // kode kedaluwarsa tetap disimpan 3 jam agar sesi yang memakainya tidak terputus
-
+  
+  const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const tokenize = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
   const sortedKey = (t) => [...t].sort().join(' ');
   const normA = (s) => tokenize(s).join(' ');
@@ -473,7 +474,7 @@
     return { owner, repo, branch: ls.get('cs_gh_branch') || 'main' };
   };
   const parseKeys = (txt) => {
-    try { const k = JSON.parse(String(txt).replace(/^\s*window\.CS_KEYS\s*=\s*/, '').replace(/;\s*$/, '')); return k && k.v === 1 && Array.isArray(k.accounts) && Array.isArray(k.admins) ? k : null; } catch (e) { return null; }
+    try { const k = JSON.parse(String(txt).replace(/^\s*window\.CS_KEYS\s*=\s*/, '').replace(/;\s*$/, '')); return k && k.v === 1 && Array.isArray(k.admins) ? k : null; } catch (e) { return null; }
   };
   /** Ambil keys.js terbaru langsung dari GitHub (bukan dari cache situs). Gagal/offline → null (tidak mengganggu). */
   async function fetchLiveKeys() {
@@ -497,14 +498,13 @@
   function sessionValid(k) {
     if (!SESS || !k) return true;
     if (SESS.role === 'admin') return k.admins.some((x) => x.h === SESS.h);
-    if (SESS.invId) return (k.invites || []).some((x) => x.id === SESS.invId);
-    if (SESS.accId) { const a = k.accounts.find((x) => x.id === SESS.accId); return !!a && (!SESS.wrap || a.wrap === SESS.wrap); }
+    if (SESS.team) return !!k.team && (!SESS.wrap || k.team.wrap === SESS.wrap);   // kode tim diganti admin → semua keluar
     return true;
   }
   async function watchSession() {
     if (!SESS) return;
     await refreshKeys(false);
-    if (SESS && LIVE && !sessionValid(LIVE)) loggedOut('Akses Anda sudah dinonaktifkan oleh admin. Hubungi admin untuk diaktifkan lagi.');
+    if (SESS && LIVE && !sessionValid(LIVE)) loggedOut('Akses Anda sudah dinonaktifkan oleh admin (kode tim diganti). Minta kode baru ke admin.');
   }
   window.addEventListener('focus', () => { if (SESS) watchSession(); });
 
@@ -524,10 +524,12 @@
     show($('btnAdminPanel'), SESS.role === 'admin');
     clearInterval(tickT); tick(); tickT = setInterval(tick, 1000);
     clearInterval(watchT); watchT = setInterval(watchSession, 60000); setTimeout(watchSession, 3000);
+    clearInterval(pingT); if (SESS.team) { pingNow(); pingT = setInterval(pingNow, 45000); }
     try { await loadBank(); } catch (e) { console.error(e); $('status').className = 'chip err'; $('statusTxt').textContent = 'Gagal membuka data: ' + (e.message || e); }
   }
   function loggedOut(note) {
-    clearInterval(tickT); clearInterval(watchT); gateUntil = 0; $('ovGate').classList.remove('show'); DEK = null; SESS = null; LAST = null; ENT = []; exactMap = new Map(); META = null;
+    if (SESS && SESS.team) relay({ a: 'bye', id: devId() });                          // kabari Pusat Perangkat: sesi selesai
+    clearInterval(tickT); clearInterval(watchT); clearInterval(pingT); clearInterval(tmT); clearInterval(devT); gateUntil = 0; $('ovGate').classList.remove('show'); DEK = null; SESS = null; LAST = null; ENT = []; exactMap = new Map(); META = null;
     ss.del('cs_session'); ss.del('cs_gh_token');
     $('out').innerHTML = ''; $('q').value = ''; $('rep').innerHTML = ''; closePop(); $('ovAdmin').classList.remove('show'); $('ovAi').classList.remove('show');
     show($('app'), false); show($('login'), true); $('lgPw').value = ''; $('adPw').value = ''; toggle(false);
@@ -541,32 +543,75 @@
     $('timer').textContent = h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
     $('timer').classList.toggle('low', left < 300);
   }
-  const normInvite = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const usedInv = () => { try { return JSON.parse(ls.get('cs_used_inv') || '[]'); } catch (e) { return []; } };
+  /* ---------- Perangkat: ID acak per browser + jenis HP/PC (dikirim ke Pusat Perangkat bila admin memasangnya) ---------- */
+  const DEV_ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let devMem = '';
+  function devId() {
+    let v = ls.get('cs_dev');
+    if (!v || !/^[A-Z0-9]{6,12}$/.test(v)) { v = devMem; if (!v) { for (const x of C.rnd(8)) v += DEV_ALPHA[x % DEV_ALPHA.length]; devMem = v; } ls.set('cs_dev', v); }
+    return v;
+  }
+  function devLabel() {
+    const ua = navigator.userAgent || '', pf = navigator.platform || '', m = ua.match(/Android\s[\d.]+;\s*([^;)]+)/);
+    let os = 'Perangkat';
+    if (/iPhone/.test(ua)) os = 'iPhone';
+    else if (/iPad/.test(ua) || (pf === 'MacIntel' && navigator.maxTouchPoints > 1)) os = 'iPad';
+    else if (/Android/.test(ua)) os = 'Android' + (m && m[1].trim().length > 1 && !/^K$/.test(m[1].trim()) ? ' ' + m[1].trim() : '');
+    else if (/Windows/.test(ua)) os = 'Windows PC';
+    else if (/CrOS/.test(ua)) os = 'Chromebook';
+    else if (/Mac/.test(ua)) os = 'Mac';
+    else if (/Linux/.test(ua)) os = 'Linux';
+    const br = /Edg\//.test(ua) ? 'Edge' : /OPR\/|Opera/.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : '';
+    return br ? os + ' · ' + br : os;
+  }
+  /** Panggil Pusat Perangkat (Apps Script milik admin). Tidak terpasang / gagal → null (login tetap jalan). */
+  async function relay(params) {
+    const base = KEYS && KEYS.reg; if (!base || !/^https:\/\/script\.google(usercontent)?\.com\//.test(base)) return null;
+    let to = null;
+    try {
+      const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null; if (ctl) to = setTimeout(() => ctl.abort(), 9000);
+      const qs = Object.keys(params).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(params[k])).join('&');
+      const r = await fetch(base + (base.includes('?') ? '&' : '?') + qs + '&_=' + Date.now(), { cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+      const j = await r.json(); return j && typeof j === 'object' ? j : null;
+    } catch (e) { return null; } finally { if (to) clearTimeout(to); }
+  }
+  async function pingNow() {
+    if (!SESS || !SESS.team) return;
+    const r = await relay({ a: 'ping', id: devId(), n: SESS.name, l: devLabel(), x: SESS.exp });
+    if (SESS && r && r.blocked) loggedOut('Akses perangkat ini diputus oleh admin. Hubungi admin untuk diaktifkan lagi.');
+  }
+  function mailAdminHref() {
+    const body = 'Halo Admin,\n\nSaya ingin minta kode Authenticator untuk login Cari Jawaban Soal.\nNama: ' + ($('lgUser').value.trim() || '') + '\nToko/Area: \nPerangkat: ' + devLabel() + '\nID perangkat: ' + devId() + '\n\nTerima kasih.';
+    return 'mailto:' + ADMIN_CONTACT.join(',') + '?subject=' + encodeURIComponent('Minta kode login Cari Jawaban Soal') + '&body=' + encodeURIComponent(body);
+  }
+  $('lgDev').textContent = devLabel() + ' · ID ' + devId();
+  $('mailAdmin').addEventListener('click', () => { $('mailAdmin').href = mailAdminHref(); });
+  $('mailAdmin').href = mailAdminHref(); $('lgUser').addEventListener('input', () => { $('mailAdmin').href = mailAdminHref(); });
+
+  /** Login tim: HANYA kode 6 angka dari Google Authenticator admin (Authenticator tim yang tertanam di web ini).
+      Nama boleh diisi supaya admin tahu siapa yang masuk. Kode diminta ke admin setiap kali login; sesi maksimal 2 jam. */
   async function loginTeam() {
-    const raw = $('lgUser').value.trim(), pwRaw = $('lgPw').value, pw = C.normTeam(pwRaw);
-    if (!pwRaw.trim()) return msg('msgTeam', 'Isi password dulu.');
-    if (raw.includes('@')) return loginAdminWith(raw.toLowerCase(), pwRaw, 'msgTeam');     // email diketik di kolom username → login admin
-    const u = raw.toLowerCase();
+    const raw = $('lgUser').value.trim(), codeRaw = $('lgPw').value;
+    if (!codeRaw.trim()) return msg('msgTeam', 'Isi kode Authenticator 6 angka dari admin dulu.');
+    if (raw.includes('@')) return loginAdminWith(raw.toLowerCase(), codeRaw, 'msgTeam');     // email diketik di kolom nama → login admin
+    if (Date.now() < tLock) return msg('msgTeam', 'Terlalu banyak kode salah. Tunggu ' + Math.ceil((tLock - Date.now()) / 1000) + ' detik.');
+    const digits = codeRaw.replace(/\D/g, '');
+    if (digits.length !== 6) return msg('msgTeam', 'Kode harus 6 angka — minta kode terbaru ke admin.');
     $('btnLogin').disabled = true; msg('msgTeam', 'Memeriksa…', true);
     try {
-      await refreshKeys(true);                                       // pakai data akun terbaru dari GitHub
-      for (const a of KEYS.accounts.filter((x) => !u || x.id === u || x.name.toLowerCase() === u)) {
-        const dek = await C.unwrapDek(a, pw, KEYS.iter);
-        if (dek) { $('lgPw').value = ''; msg('msgTeam', ''); return await startSession({ role: 'team', name: a.name, accId: a.id, wrap: a.wrap }, dek); }
+      await refreshKeys(true);                                       // pakai data terbaru dari GitHub
+      const T = KEYS.team;
+      if (!T) return msg('msgTeam', 'Login tim belum diaktifkan admin. Hubungi admin lewat email di bawah.');
+      if (!(await totpVerify(b32dec(T.s), digits))) {
+        if (++tFails >= 5) { tFails = 0; tLock = Date.now() + 30000; }
+        return msg('msgTeam', 'Kode salah atau sudah berganti. Minta kode terbaru ke admin (kode berubah tiap 30 detik).');
       }
-      // kode undangan (pengguna baru): belum kedaluwarsa & belum dipakai di perangkat ini
-      const code = normInvite(pwRaw), used = usedInv();
-      if (code.length >= 8) for (const inv of (KEYS.invites || []).filter((x) => x.exp > Date.now() && !used.includes(x.id))) {
-        const dek = await C.unwrapDek(inv, 'inv|' + code, KEYS.iter);
-        if (dek) {
-          ls.set('cs_used_inv', JSON.stringify([...used, inv.id]));
-          $('lgPw').value = ''; msg('msgTeam', '');
-          return await startSession({ role: 'team', name: inv.name + ' (undangan)', invId: inv.id }, dek);
-        }
-      }
-      const looksCode = /^[A-Za-z0-9]{5}-[A-Za-z0-9]{5}$/.test(pwRaw.trim());
-      msg('msgTeam', looksCode ? 'Kode tidak cocok, sudah kedaluwarsa, sudah dipakai di perangkat ini, atau belum diaktifkan admin. Minta admin membuat kode baru.' : (u ? 'Username atau password salah.' : 'Password atau kode salah.'));
+      const dek = await C.unwrapDek(T, 'tpt|' + T.s, KEYS.iter);
+      if (!dek) return msg('msgTeam', 'Data login tim rusak. Hubungi admin.');
+      const st = await relay({ a: 'chk', id: devId() });
+      if (st && st.blocked) return msg('msgTeam', 'Perangkat ini diputus oleh admin. Hubungi admin lewat email di bawah.');
+      tFails = 0; $('lgPw').value = ''; msg('msgTeam', '');
+      await startSession({ role: 'team', name: (raw || 'TIM').replace(/[\u0000-\u001f<>]/g, '').toUpperCase().slice(0, 30), team: 1, wrap: T.wrap }, dek);
     } finally { $('btnLogin').disabled = false; }
   }
   async function loginAdminWith(em, pw, msgId) {
@@ -590,7 +635,6 @@
   }
   const loginAdmin = () => loginAdminWith($('adEmail').value.trim().toLowerCase(), $('adPw').value, 'msgAdmin');
   $('btnLogin').onclick = loginTeam; $('btnAdmin').onclick = loginAdmin;
-  $('mailAdmin').href = 'mailto:' + ADMIN_CONTACT.join(',') + '?subject=' + encodeURIComponent('Minta akses Cari Jawaban Soal') + '&body=' + encodeURIComponent('Halo Admin,\n\nSaya ingin minta akses ke Cari Jawaban Soal.\nNama: \nToko/Area: \n\nTerima kasih.');
   $('lgPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loginTeam(); });
   $('lgUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lgPw').focus(); });
   $('adPw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loginAdmin(); });
@@ -605,6 +649,11 @@
     for (const b of u8) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } val &= (1 << bits) - 1; }
     if (bits > 0) out += B32[(val << (5 - bits)) & 31];
     return out;
+  }
+  function b32dec(str) {
+    let bits = 0, val = 0; const out = [];
+    for (const ch of String(str).toUpperCase().replace(/[^A-Z2-7]/g, '')) { val = (val << 5) | B32.indexOf(ch); bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; val &= (1 << bits) - 1; } }
+    return new Uint8Array(out);
   }
   async function totpCode(secretU8, step) {
     const msgb = new Uint8Array(8); let t = step; for (let i = 7; i >= 0; i--) { msgb[i] = t & 255; t = Math.floor(t / 256); }
@@ -638,71 +687,16 @@
   $('totpCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitTotp(); });
 
   /* ====================== PANEL ADMIN ====================== */
-  const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const keysText = () => { KEYS.updated = new Date().toISOString(); KEYS.invites = (KEYS.invites || []).filter((v) => v.exp > Date.now() - INV_KEEP); return 'window.CS_KEYS=' + JSON.stringify(KEYS) + ';\n'; };
+  const keysText = () => { KEYS.updated = new Date().toISOString(); delete KEYS.invites; delete KEYS.users; KEYS.accounts = []; return 'window.CS_KEYS=' + JSON.stringify(KEYS) + ';\n'; };
   const adMsg = (html, cls) => { $('pubMsg').innerHTML = html ? '<div class="alert ' + (cls || 'ok') + '">' + html + '</div>' : ''; };
 
-  function renderAcc() {
-    $('accTbl').innerHTML = '<tr><th>Akun</th><th>Password baru</th><th></th></tr>' + KEYS.accounts.map((a) =>
-      '<tr><td><b>' + esc(a.name) + '</b></td><td><input class="inp" data-pw="' + esc(a.id) + '" type="text" placeholder="ketik password baru"></td><td style="white-space:nowrap"><button class="btn btn-sm btn-acc" data-set="' + esc(a.id) + '">Ganti</button> <button class="btn btn-sm btn-danger" data-del="' + esc(a.id) + '">Hapus</button></td></tr>').join('');
-    $('rotList').innerHTML = KEYS.accounts.map((a) => '<label class="lab">Password baru untuk ' + esc(a.name) + '</label><input class="inp" data-rot="' + esc(a.id) + '" type="text" placeholder="minimal 6 karakter">').join('');
-  }
-  async function setAccPassword(id, pw) {
-    if (pw.trim().length < 6) return adMsg('Password minimal 6 karakter.', 'err');
-    const i = KEYS.accounts.findIndex((a) => a.id === id); if (i < 0) return;
-    KEYS.accounts[i] = { id, name: KEYS.accounts[i].name, ...(await C.wrapDek(DEK, C.normTeam(pw), KEYS.iter)) };
-    await commitKeys('Password <b>' + esc(KEYS.accounts[i].name) + '</b> diganti.');
-  }
-  $('accTbl').addEventListener('click', async (e) => {
-    const s = e.target.closest('[data-set]'), d = e.target.closest('[data-del]');
-    if (s) { const inp = $('accTbl').querySelector('[data-pw="' + s.dataset.set + '"]'); await setAccPassword(s.dataset.set, inp.value); inp.value = ''; showTab('pub-hint'); }
-    if (d) {
-      if (KEYS.accounts.length <= 1) return adMsg('Minimal harus ada 1 akun tim.', 'err');
-      if (!confirm('Hapus akun ' + d.dataset.del + '?')) return;
-      KEYS.accounts = KEYS.accounts.filter((a) => a.id !== d.dataset.del); renderAcc();
-      await commitKeys('Akun <b>' + esc(d.dataset.del) + '</b> dihapus — langsung nonaktif. Catatan: yang pernah menyimpan file kunci lama masih bisa membuka data lama; pakai “Rotasi penuh” untuk mencabut total.');
-    }
-  });
-  $('addAcc').onclick = async () => {
-    const name = $('newName').value.trim(), pw = $('newPw').value, id = slug(name);
-    if (!id) return adMsg('Isi nama akun.', 'err');
-    if (KEYS.accounts.some((a) => a.id === id)) return adMsg('Nama akun sudah dipakai.', 'err');
-    if (pw.trim().length < 6) return adMsg('Password minimal 6 karakter.', 'err');
-    KEYS.accounts.push({ id, name: name.toUpperCase(), ...(await C.wrapDek(DEK, C.normTeam(pw), KEYS.iter)) });
-    $('newName').value = ''; $('newPw').value = ''; renderAcc();
-    await commitKeys('Akun <b>' + esc(name.toUpperCase()) + '</b> ditambahkan.');
-  };
   $('mePwSave').onclick = async () => {
     const pw = $('mePw').value; if (pw.length < 8) return adMsg('Password admin minimal 8 karakter.', 'err');
     const i = KEYS.admins.findIndex((x) => x.h === SESS.h); if (i < 0) return adMsg('Entri admin tidak ditemukan.', 'err');
     KEYS.admins[i] = { h: SESS.h, ...(await C.wrapDek(DEK, C.adminSecret(SESS.email, pw), KEYS.iter)), ...(KEYS.admins[i].tp ? { tp: KEYS.admins[i].tp } : {}) };
     $('mePw').value = ''; await commitKeys('Password admin untuk <b>' + esc(SESS.email) + '</b> diganti.');
   };
-  const INV_ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const fmtCode = (c) => c.slice(0, 5) + '-' + c.slice(5);
-  const newInviteCode = () => { const r = C.rnd(10); let s = ''; for (const x of r) s += INV_ALPHA[x % INV_ALPHA.length]; return s; };
   const fmtDate = (t) => new Date(t).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
-  function renderInv() {
-    KEYS.invites = (KEYS.invites || []);
-    $('invTbl').innerHTML = KEYS.invites.length ? '<tr><th>Nama</th><th>Berlaku sampai</th><th>Status</th><th></th></tr>' + KEYS.invites.map((v) =>
-      '<tr><td><b>' + esc(v.name) + '</b></td><td>' + fmtDate(v.exp) + '</td><td>' + (v.exp > Date.now() ? 'aktif' : 'kedaluwarsa') + '</td><td><button class="btn btn-sm btn-danger" data-invdel="' + esc(v.id) + '">Hapus</button></td></tr>').join('') : '<tr><td class="note">Belum ada kode undangan.</td></tr>';
-  }
-  $('invMake').onclick = async () => {
-    const name = $('invName').value.trim(); if (!name) return adMsg('Isi nama pengguna dulu.', 'err');
-    KEYS.invites = (KEYS.invites || []).filter((v) => v.exp > Date.now() - INV_KEEP);
-    if (KEYS.invites.filter((v) => v.exp > Date.now()).length >= 20) return adMsg('Maksimal 20 kode aktif. Hapus yang tidak dipakai dulu.', 'err');
-    const code = newInviteCode(), ttl = +$('invTtl').value, exp = Date.now() + ttl * 3600 * 1000;
-    const id = 'i' + Date.now().toString(36) + C.b64(C.rnd(3)).replace(/[^A-Za-z0-9]/g, '');
-    KEYS.invites.push({ id, name, exp, ...(await C.wrapDek(DEK, 'inv|' + code, KEYS.iter)) });
-    renderInv();
-    const ok = await commitKeys('Kode pengguna baru dibuat.');
-    const stat = ok ? '✅ <b>Langsung aktif</b>, tidak perlu deploy ulang.' : '⚠️ <b>Belum aktif</b> — isi token GitHub (tab Terbitkan ke GitHub) agar langsung aktif.';
-    const em = $('invEmail').value.trim();
-    const body = 'Halo ' + name + ',\n\nKode login sekali pakai Cari Jawaban Soal: ' + fmtCode(code) + '\nBerlaku sampai ' + fmtDate(exp) + '.\nMasukkan kode ini di kolom Password pada halaman login.\n\nSesi aktif maksimal 2 jam.';
-    $('invNew').innerHTML = '<div class="alert ok">Kode untuk <b>' + esc(name) + '</b>: <span style="font-size:22px;font-weight:800;letter-spacing:2px;user-select:all">' + fmtCode(code) + '</span><br>Berlaku sampai ' + fmtDate(exp) + '. Kode ini hanya ditampilkan sekarang. ' + stat + '<div class="actions"><button class="btn btn-sm" data-copy="' + fmtCode(code) + '">Salin kode</button> <a class="btn btn-sm" style="text-decoration:none;display:inline-block" href="mailto:' + encodeURIComponent(em) + '?subject=' + encodeURIComponent('Kode login Cari Jawaban Soal') + '&body=' + encodeURIComponent(body.replace(/\\n/g, '\n')) + '">✉️ Kirim lewat email</a></div></div>';
-    $('invName').value = '';
-  };
-  $('invTbl').addEventListener('click', async (e) => { const d = e.target.closest('[data-invdel]'); if (!d) return; KEYS.invites = KEYS.invites.filter((v) => v.id !== d.dataset.invdel); renderInv(); await commitKeys('Kode dihapus — pengguna yang memakai kode itu langsung nonaktif.'); });
   $('admAdd').onclick = async () => {
     const em = $('admNewEmail').value.trim().toLowerCase(), pw = $('admNewPw').value;
     if (!/^\S+@\S+\.\S+$/.test(em)) return adMsg('Email admin tidak valid.', 'err');
@@ -712,6 +706,91 @@
     const i = KEYS.admins.findIndex((x) => x.h === h); if (i >= 0) { if (KEYS.admins[i].tp) entry.tp = KEYS.admins[i].tp; KEYS.admins[i] = entry; } else KEYS.admins.push(entry);
     $('admNewEmail').value = ''; $('admNewPw').value = ''; await commitKeys('Admin <b>' + esc(em) + '</b> disimpan.');
   };
+  const qrSvg = (uri) => { try { const q = window.qrcode(0, 'M'); q.addData(uri); q.make(); return q.createSvgTag({ cellSize: 5, margin: 2, scalable: true }); } catch (e) { return ''; } };
+  const teamUri = (key) => 'otpauth://totp/' + encodeURIComponent('Cari Jawaban Soal:Tim') + '?secret=' + key + '&issuer=' + encodeURIComponent('Cari Jawaban Soal') + '&algorithm=SHA1&digits=6&period=30';
+
+  /* ---------- Authenticator tim: satu Authenticator milik admin, dipakai semua anggota tim untuk login ---------- */
+  function renderTeam() {
+    const T = KEYS.team, on = !!T; TMSETUP = null; show($('tmSetup'), false);
+    $('tmState').className = 'alert ' + (on ? 'ok' : 'warn');
+    $('tmState').innerHTML = on ? '🟢 <b>Authenticator tim aktif</b> — anggota tim login hanya dengan kode 6 angka dari Authenticator admin ini. Dibuat ' + (T.at ? esc(fmtDate(T.at)) : '—') + '.' : '⚪ <b>Belum dibuat.</b> Buat dulu supaya anggota tim bisa login memakai kode dari admin.';
+    show($('tmOn'), on); $('tmStart').textContent = on ? 'Ganti Authenticator tim (putuskan semua)' : 'Buat Authenticator tim';
+    if (on) { $('tmQr').innerHTML = qrSvg(teamUri(T.s)) || ''; $('tmKey').textContent = T.s.match(/.{1,4}/g).join(' '); tmTick(); }
+  }
+  async function tmTick() {
+    const T = KEYS && KEYS.team; if (!T || $('tab-tm').classList.contains('hidden')) return;
+    const now = Date.now(), code = await totpCode(b32dec(T.s), Math.floor(now / 30000));
+    $('tmLive').textContent = code.slice(0, 3) + ' ' + code.slice(3); $('tmLeft').textContent = 30 - Math.floor(now / 1000) % 30;
+  }
+  $('tmStart').onclick = () => {
+    if (KEYS.team && !confirm('Semua anggota tim yang sedang login akan keluar, dan semua admin harus memindai QR baru. Lanjutkan?')) return;
+    TMSETUP = C.rnd(20); const key = b32enc(TMSETUP);
+    $('tmQrNew').innerHTML = qrSvg(teamUri(key)) || '<div class="note" style="color:#111">QR gagal dibuat — ketik kunci manual di bawah.</div>';
+    $('tmKeyNew').textContent = key.match(/.{1,4}/g).join(' '); $('tmCodeIn').value = ''; show($('tmSetup'), true);
+  };
+  $('tmConfirm').onclick = async () => {
+    if (!TMSETUP) return;
+    if (!(await totpVerify(TMSETUP, $('tmCodeIn').value))) return adMsg('Kode belum cocok. Pastikan jam HP otomatis, lalu coba kode terbaru.', 'err');
+    const key = b32enc(TMSETUP);
+    KEYS.team = { s: key, ...(await C.wrapDek(DEK, 'tpt|' + key, KEYS.iter)), at: new Date().toISOString() };
+    TMSETUP = null; renderTeam();
+    await commitKeys('Authenticator tim aktif. Anggota tim login dengan kode 6 angka dari Authenticator ini.');
+  };
+  $('tmCopy').onclick = async () => { try { await navigator.clipboard.writeText($('tmLive').textContent.replace(/\s/g, '')); $('tmCopy').textContent = 'Tersalin ✓'; setTimeout(() => { $('tmCopy').textContent = 'Salin kode'; }, 1500); } catch (e) { /* diblokir */ } };
+
+  /* ---------- Perangkat: daftar HP/PC yang terhubung + putuskan kapan saja (butuh Pusat Perangkat) ---------- */
+  const regKey = () => ($('regKey').value || '').trim() || ss.get('cs_reg_key') || ls.get('cs_reg_key_p') || '';
+  function renderDevices() {
+    const on = !!KEYS.reg; show($('devSetup'), !on || $('devCfgOpen').dataset.open === '1'); show($('devList'), on);
+    $('regUrl').value = KEYS.reg || ''; $('regKey').value = ss.get('cs_reg_key') || ls.get('cs_reg_key_p') || ''; $('regRemember').checked = !!ls.get('cs_reg_key_p');
+    if (on) loadDevices();
+  }
+  const ago = (t) => { const d = Math.max(0, Math.floor((Date.now() - t) / 1000)); return d < 60 ? d + ' dtk lalu' : d < 3600 ? Math.floor(d / 60) + ' mnt lalu' : d < 86400 ? Math.floor(d / 3600) + ' jam lalu' : fmtDate(t); };
+  async function loadDevices(quiet) {
+    if (!KEYS.reg) return; if (!quiet) $('devTbl').innerHTML = '<tr><td class="note"><span class="spin"></span>Memuat perangkat…</td></tr>';
+    const r = await relay({ a: 'list', k: regKey() });
+    if (!r) { $('devTbl').innerHTML = '<tr><td class="note">Tidak bisa menghubungi Pusat Perangkat. Cek alamat Apps Script & pengaturan akses “Siapa saja”.</td></tr>'; return; }
+    if (!r.ok) { $('devTbl').innerHTML = '<tr><td class="note">' + (r.err === 'key' ? 'Kunci admin salah / belum diisi. Buka “Pengaturan Pusat Perangkat”.' : esc(r.err || 'Gagal memuat.')) + '</td></tr>'; return; }
+    DEVS = (r.list || []).slice().sort((a, b) => (b.t || 0) - (a.t || 0));
+    const now = Date.now(), online = (d) => !d.b && !d.o && d.x > now && now - d.t < 120000;
+    $('devCount').textContent = DEVS.filter(online).length + ' online · ' + DEVS.length + ' tercatat';
+    $('devTbl').innerHTML = DEVS.length ? '<tr><th>Nama</th><th>Perangkat</th><th>Masuk</th><th>Terakhir aktif</th><th>Status</th><th></th></tr>' + DEVS.map((d) =>
+      '<tr><td><b>' + esc(d.n || '—') + '</b><div class="note" style="margin:0">ID ' + esc(d.id) + '</div></td><td>' + esc(d.l || '—') + '</td><td>' + (d.f ? esc(fmtDate(d.f)) : '—') + '</td><td>' + (d.t ? ago(d.t) : '—') + '</td><td>' +
+      (d.b ? '🔴 Diputus' : online(d) ? '🟢 Online' : '⚪ ' + (d.o ? 'Keluar' : 'Offline')) + '</td><td style="white-space:nowrap">' +
+      (d.b ? '<button class="btn btn-sm btn-acc" data-dev="unblock" data-id="' + esc(d.id) + '">Izinkan lagi</button>' : '<button class="btn btn-sm btn-danger" data-dev="block" data-id="' + esc(d.id) + '">Putuskan</button>') +
+      ' <button class="btn btn-sm" data-dev="del" data-id="' + esc(d.id) + '">Hapus</button></td></tr>').join('') : '<tr><td class="note">Belum ada perangkat tim yang login.</td></tr>';
+  }
+  $('devTbl').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-dev]'); if (!b) return;
+    const op = b.dataset.dev, id = b.dataset.id;
+    if (op === 'del' && !confirm('Hapus catatan perangkat ini? (Bila sedang diputus, ia bisa login lagi.)')) return;
+    b.disabled = true; const r = await relay({ a: op, id, k: regKey() });
+    if (!r || !r.ok) adMsg('Gagal menghubungi Pusat Perangkat' + (r && r.err ? ': ' + esc(r.err) : '') + '.', 'err');
+    else adMsg(op === 'block' ? 'Perangkat <b>' + esc(id) + '</b> diputus — ia keluar otomatis dalam ±45 detik dan tidak bisa login lagi sampai diizinkan.' : op === 'unblock' ? 'Perangkat <b>' + esc(id) + '</b> diizinkan lagi (perlu kode baru dari admin).' : 'Catatan perangkat dihapus.', 'ok');
+    loadDevices(true);
+  });
+  $('devRefresh').onclick = () => loadDevices();
+  $('devCutAll').onclick = async () => {
+    const now = Date.now(), live = DEVS.filter((d) => !d.b && !d.o && d.x > now && now - d.t < 120000);
+    if (!live.length) return adMsg('Tidak ada perangkat online.', 'warn');
+    if (!confirm('Putuskan ' + live.length + ' perangkat yang sedang online?')) return;
+    for (const d of live) await relay({ a: 'block', id: d.id, k: regKey() });
+    adMsg(live.length + ' perangkat diputus.', 'ok'); loadDevices(true);
+  };
+  $('devCfgOpen').onclick = () => { $('devCfgOpen').dataset.open = $('devCfgOpen').dataset.open === '1' ? '0' : '1'; show($('devSetup'), $('devCfgOpen').dataset.open === '1' || !KEYS.reg); };
+  $('regSave').onclick = async () => {
+    const url = $('regUrl').value.trim(), key = $('regKey').value.trim();
+    if (!/^https:\/\/script\.google(usercontent)?\.com\/\S+$/.test(url)) return adMsg('Alamat harus berawalan https://script.google.com/… (alamat Web app hasil Deploy).', 'err');
+    if (key.length < 8) return adMsg('Isi kunci admin (sama dengan ADMIN_KEY di Apps Script, min. 8 karakter).', 'err');
+    ss.set('cs_reg_key', key); if ($('regRemember').checked) ls.set('cs_reg_key_p', key); else ls.del('cs_reg_key_p');
+    const test = await (async () => { const old = KEYS.reg; KEYS.reg = url; const r = await relay({ a: 'list', k: key }); if (!r || !r.ok) KEYS.reg = old; return r; })();
+    if (!test) return adMsg('Tidak ada respons dari alamat itu. Pastikan sudah di-Deploy sebagai Web app dengan akses “Siapa saja”.', 'err');
+    if (!test.ok) return adMsg(test.err === 'key' ? 'Kunci admin tidak cocok dengan ADMIN_KEY di Apps Script.' : 'Ditolak: ' + esc(test.err || ''), 'err');
+    $('devCfgOpen').dataset.open = '0'; renderDevices();
+    await commitKeys('Pusat Perangkat terhubung. Perangkat tim akan muncul di daftar setelah login.');
+  };
+  $('regCopy').onclick = async () => { try { const t = await (await fetch('tools/Code.gs', { cache: 'no-store' })).text(); await navigator.clipboard.writeText(t); $('regCopy').textContent = 'Kode tersalin ✓'; } catch (e) { adMsg('Tidak bisa menyalin otomatis. Buka berkas <code>tools/Code.gs</code> di repo lalu salin isinya.', 'warn'); } };
+
   function renderTotp() {
     const me = KEYS.admins.find((x) => x.h === SESS.h), on = !!(me && me.tp);
     $('totpState').className = 'alert ' + (on ? 'ok' : 'warn');
@@ -744,19 +823,22 @@
     await commitKeys('Authenticator admin lain direset.');
   };
   function showTab(t) {
-    if (t === 'pub-hint') t = 'acc';
+    if (t === 'pub-hint') t = 'dev';
     document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
-    show($('tab-acc'), t === 'acc'); show($('tab-inv'), t === 'inv'); show($('tab-tot'), t === 'tot'); show($('tab-me'), t === 'me'); show($('tab-pub'), t === 'pub');
+    ['dev', 'tm', 'tot', 'me', 'pub'].forEach((x) => show($('tab-' + x), t === x));
+    clearInterval(tmT); clearInterval(devT);
+    if (t === 'tm') { tmTick(); tmT = setInterval(tmTick, 1000); }
+    if (t === 'dev') devT = setInterval(() => { if (KEYS && KEYS.reg) loadDevices(true); }, 15000);
   }
   document.querySelectorAll('.tab').forEach((b) => { b.onclick = () => showTab(b.dataset.tab); });
   async function openAdminPanel() {
     await refreshKeys(true);                                         // mulai dari data akun terbaru
-    KEYS = JSON.parse(JSON.stringify(KEYS)); renderAcc(); renderInv(); $('invNew').innerHTML = ''; $('meEmail').textContent = SESS.email; $('rotAdmin').value = ''; $('rotEmails').value = SESS.email;
+    KEYS = JSON.parse(JSON.stringify(KEYS)); $('meEmail').textContent = SESS.email; $('rotAdmin').value = ''; $('rotEmails').value = SESS.email;
     const h = location.hostname, seg = location.pathname.split('/').filter(Boolean)[0];
     const owner = ls.get('cs_gh_owner') || (h.endsWith('.github.io') ? h.split('.')[0] : '');
     $('ghOwner').value = owner; $('ghRepo').value = ls.get('cs_gh_repo') || (h.endsWith('.github.io') ? (seg && !/\.html?$/.test(seg) ? seg : owner + '.github.io') : '');
     $('ghBranch').value = ls.get('cs_gh_branch') || 'main'; $('ghToken').value = ss.get('cs_gh_token') || ls.get('cs_gh_token_p') || ''; $('ghRemember').checked = !!ls.get('cs_gh_token_p');
-    renderTotp(); adMsg(''); syncBar(); showTab('acc'); $('ovAdmin').classList.add('show');
+    renderTotp(); renderTeam(); adMsg(''); syncBar(); $('ovAdmin').classList.add('show'); showTab('dev'); renderDevices();
   }
   function openGate() { $('gatePw').value = ''; msg('gateMsg', ''); $('gateEmail').textContent = SESS.email; $('ovGate').classList.add('show'); setTimeout(() => $('gatePw').focus(), 60); }
   async function submitGate() {
@@ -772,7 +854,7 @@
   $('btnAdminPanel').onclick = () => (Date.now() < gateUntil ? openAdminPanel() : openGate());
   $('gateGo').onclick = submitGate; $('gateClose').onclick = () => $('ovGate').classList.remove('show');
   $('gatePw').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitGate(); });
-  $('adClose').onclick = () => $('ovAdmin').classList.remove('show');
+  $('adClose').onclick = () => { clearInterval(tmT); clearInterval(devT); $('ovAdmin').classList.remove('show'); };
 
   const download = (name, text) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/javascript' })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); };
   async function bankText(dek) {
@@ -851,23 +933,21 @@
   $('dlKeys').onclick = () => { download('keys.js', keysText()); adMsg('keys.js terunduh. Ganti file <code>data/keys.js</code> di repo GitHub dengan file ini.', 'ok'); };
   $('dlBank').onclick = async () => { download('bank.js', await bankText(DEK)); adMsg('bank.js terunduh. Ganti file <code>data/bank.js</code> di repo GitHub dengan file ini.', 'ok'); };
   $('rotGo').onclick = async () => {
-    const pws = {}; let bad = false;
-    $('rotList').querySelectorAll('[data-rot]').forEach((i) => { if (i.value.trim().length < 6) bad = true; pws[i.dataset.rot] = i.value; });
     const adm = $('rotAdmin').value;
-    if (bad || adm.length < 8) return adMsg('Isi password baru semua akun (min 6 karakter) dan password admin (min 8 karakter).', 'err');
-    if (!confirm('Rotasi penuh: semua password lama dicabut dan bank soal dienkripsi ulang. Lanjutkan?')) return;
+    if (adm.length < 8) return adMsg('Isi password admin baru (min 8 karakter).', 'err');
+    if (!confirm('Rotasi penuh: kunci data baru, bank soal dienkripsi ulang, Authenticator tim diganti, dan semua perangkat tim keluar. Lanjutkan?')) return;
     busy($('rotGo'), true); adMsg('<span class="spin"></span>Rotasi kunci & menerbitkan…', 'warn');
     try {
       const cfg = ghCfg(), nd = C.rnd(32), emails = $('rotEmails').value.split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^\S+@\S+\.\S+$/.test(x));
       if (!emails.includes(SESS.email)) throw new Error('Email admin yang sedang masuk harus ada di daftar.');
-      const nk = { v: 1, iter: KEYS.iter, updated: '', accounts: [], admins: [], invites: [] };
-      for (const a of KEYS.accounts) nk.accounts.push({ id: a.id, name: a.name, ...(await C.wrapDek(nd, C.normTeam(pws[a.id]), KEYS.iter)) });
+      const nk = { v: 1, iter: KEYS.iter, updated: '', accounts: [], admins: [], ...(KEYS.reg ? { reg: KEYS.reg } : {}) };
       for (const em of [...new Set(emails)]) nk.admins.push({ h: await C.sha256hex(em), ...(await C.wrapDek(nd, C.adminSecret(em, adm), KEYS.iter)) });
+      const sec = C.rnd(20), key = b32enc(sec); nk.team = { s: key, ...(await C.wrapDek(nd, 'tpt|' + key, KEYS.iter)), at: new Date().toISOString() };
       const btext = await bankText(nd);
       await ghPut(cfg, 'data/bank.js', btext, 'Admin: rotasi kunci (bank terenkripsi ulang)');
-      KEYS = nk; DEK = nd; await ghPut(cfg, 'data/keys.js', keysText(), 'Admin: rotasi kunci (akun & password baru)');
-      SESS.exp = Math.min(SESS.exp, Date.now() + SESSION_MS); ss.set('cs_session', JSON.stringify({ ...SESS, dek: C.b64(nd) }));
-      adMsg('✅ Rotasi selesai: kunci data baru, password tim & admin baru sudah diterbitkan. Situs diperbarui dalam ±1 menit; password lama tidak bisa lagi membuka data baru.', 'ok');
+      KEYS = nk; DEK = nd; await ghPut(cfg, 'data/keys.js', keysText(), 'Admin: rotasi kunci (admin & Authenticator tim baru)');
+      SESS.exp = Math.min(SESS.exp, Date.now() + SESSION_MS); ss.set('cs_session', JSON.stringify({ ...SESS, dek: C.b64(nd) })); renderTeam(); renderTotp();
+      adMsg('✅ Rotasi selesai: kunci data baru, password admin baru, dan <b>Authenticator tim baru</b> sudah diterbitkan. Buka tab “Authenticator tim” → pindai QR baru. Authenticator admin pribadi perlu dihubungkan ulang.', 'ok');
     } catch (e) { adMsg('❌ ' + (e.html || esc(e.message)), 'err'); } finally { busy($('rotGo'), false); }
   };
 
@@ -880,7 +960,7 @@
     refreshKeys(true);
     try {
       const s = JSON.parse(ss.get('cs_session') || 'null');
-      if (s && s.exp > Date.now() && s.dek) { SESS = { role: s.role, name: s.name, email: s.email, h: s.h, accId: s.accId, wrap: s.wrap, invId: s.invId, exp: s.exp }; DEK = C.unb64(s.dek); await enter(); }
+      if (s && s.exp > Date.now() && s.dek) { SESS = { role: s.role, name: s.name, email: s.email, h: s.h, team: s.team, wrap: s.wrap, exp: s.exp }; DEK = C.unb64(s.dek); await enter(); }
     } catch (e) { /* sesi tidak valid → tetap di layar login */ }
   })();
 
